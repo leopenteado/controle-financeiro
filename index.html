@@ -25,6 +25,8 @@ if (!window.XLSX) document.write('<script src="https://cdnjs.cloudflare.com/ajax
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 a{color:var(--accent)}
+html{overscroll-behavior-y:contain}
+#ptr{position:fixed;top:0;left:50%;transform:translate(-50%,-70px);transition:transform .2s ease;z-index:30;background:var(--surface);color:var(--text);border:1px solid var(--line);border-radius:99px;padding:8px 16px;font-size:13px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.25);white-space:nowrap;pointer-events:none}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif}
 .wrap{max-width:1180px;margin:0 auto;padding:20px 16px 48px}
 header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:14px}
@@ -1384,7 +1386,40 @@ $('ghForm').addEventListener('submit', e => {
   const c = {owner:$('ghOwner').value.trim().replace(/^@/, ''), repo:$('ghRepo').value.trim(), token:$('ghToken').value.trim()};
   if (c.owner && c.repo && c.token) ghConectar(c);
 });
-$('ghSync').addEventListener('click', async () => { if (ghTimer || ghMsgs.length){ clearTimeout(ghTimer); ghTimer = null; await ghGravar(); } if (await ghRecarregar()) toast('Dados atualizados do GitHub.'); });
+// Atualizar: envia o que estiver pendente e busca as mudanças do outro aparelho.
+async function atualizarTudo(){
+  if (!gh){ location.reload(); return; }
+  if (ghTimer || ghMsgs.length){ clearTimeout(ghTimer); ghTimer = null; await ghGravar(); }
+  toast(await ghRecarregar() ? 'Dados atualizados.' : 'Não consegui atualizar agora. Confira a internet.');
+}
+$('ghSync').addEventListener('click', atualizarTudo);
+
+// Puxar para atualizar (no celular, o app instalado não tem o gesto do navegador).
+(function(){
+  const el = document.createElement('div'); el.id = 'ptr'; el.setAttribute('aria-hidden', 'true'); document.body.appendChild(el);
+  const ESCONDIDO = 'translate(-50%,-70px)', LIMITE = 70;
+  let y0 = null, dist = 0, ocupado = false;
+  addEventListener('touchstart', e => {
+    y0 = null;
+    if (ocupado || e.touches.length !== 1 || window.scrollY > 0 || document.querySelector('dialog[open]')) return;
+    y0 = e.touches[0].clientY; dist = 0;
+  }, {passive:true});
+  addEventListener('touchmove', e => {
+    if (y0 === null) return;
+    dist = (e.touches[0].clientY - y0) * 0.5;
+    if (dist <= 0 || window.scrollY > 0){ el.style.transform = ESCONDIDO; return; }
+    el.style.transition = 'none';
+    el.style.transform = 'translate(-50%,' + (Math.min(dist, LIMITE + 20) - 50) + 'px)';
+    el.textContent = dist >= LIMITE ? '↻ Solte para atualizar' : '↓ Puxe para atualizar';
+  }, {passive:true});
+  addEventListener('touchend', async () => {
+    if (y0 === null) return;
+    y0 = null; el.style.transition = '';
+    if (dist < LIMITE){ el.style.transform = ESCONDIDO; return; }
+    ocupado = true; el.textContent = 'Atualizando…'; el.style.transform = 'translate(-50%,16px)';
+    try { await atualizarTudo(); } finally { ocupado = false; setTimeout(() => el.style.transform = ESCONDIDO, 300); }
+  });
+})();
 $('ghSair').addEventListener('click', async () => {
   if (!confirm('Desconectar este aparelho do GitHub? A chave é apagada deste navegador. Seus dados continuam no GitHub.')) return;
   if (ghTimer || ghMsgs.length){ clearTimeout(ghTimer); ghTimer = null; await ghGravar(); }
