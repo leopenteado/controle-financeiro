@@ -139,6 +139,16 @@ dialog label{display:flex;gap:8px;align-items:center;margin:6px 0}
         <div class="card kpi"><h2 id="k-res-h">Resultado do mês</h2><div class="v" id="k-res">—</div><div class="s" id="k-res-s"></div></div>
         <div class="card kpi"><h2>Em “Outros” (revisar)</h2><div class="v" id="k-out">—</div><div class="s"><button type="button" class="link" id="revGastos">revisar um a um</button> · <button type="button" class="link" id="verOutros">ver lista</button></div></div>
       </div>
+      <div class="card" id="provBox" style="margin-bottom:12px">
+        <div class="row" style="justify-content:space-between;align-items:center;gap:12px">
+          <div style="flex:1;min-width:220px"><h2 style="margin:0 0 4px">Fatura do C6 em aberto</h2><div class="help" id="provInfo" style="margin:0"></div></div>
+          <form class="row" id="provForm">
+            <input type="text" id="provValor" inputmode="decimal" placeholder="Total no app do C6" aria-label="Total da fatura do C6 em aberto" style="width:150px;flex:1 1 130px">
+            <button type="submit" class="primary">Atualizar</button>
+            <button type="button" id="provDel" hidden>Remover</button>
+          </form>
+        </div>
+      </div>
       <div class="grid two">
         <div class="card">
           <h2>De onde veio o dinheiro</h2>
@@ -393,7 +403,7 @@ let fileHandle = null, fileOK = false, pendingHandle = null;
 let cur = '';
 let charts = {};
 
-function blankState(){ const s = {version:1, savedAt:0, tx:[], imports:[], cfg: JSON.parse(JSON.stringify(DEFAULT_CFG))}; s.cfg.fixos = {}; return s; }
+function blankState(){ const s = {version:1, savedAt:0, tx:[], imports:[], provisorios:[], cfg: JSON.parse(JSON.stringify(DEFAULT_CFG))}; s.cfg.fixos = {}; return s; }
 
 // ---------- utilidades ----------
 const $ = id => document.getElementById(id);
@@ -603,7 +613,7 @@ async function readText(file){
 async function importFiles(files){
   if (bloqueado()) return;
   const report = [];
-  let totalAdded = 0;
+  let totalAdded = 0, provMudou = false;
   for (const file of files){
     let res;
     try { res = parseFile(await readText(file)); } catch(e){ res = {error:'não consegui ler o arquivo ('+e.message+').'}; }
@@ -631,6 +641,11 @@ async function importFiles(files){
     if (dup) extra.push(dup+' já estavam importados');
     if (res.own) extra.push(res.own+' transferências entre suas contas ignoradas');
     if (res.ignored) extra.push(res.ignored+' linhas ignoradas (cabeçalho, pagamento de fatura, zeradas)');
+    if (res.kind === 'Fatura C6' && res.rows.length){
+      const r = trocarProvisorios('C6', res.rows.reduce((m, x) => x.d > m ? x.d : m, ''));
+      if (r.removidos.length){ provMudou = true; extra.push('valor provisório da fatura em aberto de '+r.removidos.map(m => monthLabel(m, true)).join(', ')+' substituído pelas compras desta fatura'); }
+      if (r.mantidos.length) extra.push('mantive o valor provisório de '+r.mantidos.map(m => monthLabel(m, true)).join(', ')+', porque ele foi atualizado depois do fechamento desta fatura');
+    }
     report.push('<li><b>'+esc(file.name)+'</b> · '+esc(res.kind)+': '+parts.join(' e ')+(extra.length ? ' · <span class="muted">'+extra.join(', ')+'</span>' : '')+'</li>');
   }
   const rep = $('report');
@@ -641,7 +656,7 @@ async function importFiles(files){
     const months = S.tx.map(t=>t.d.slice(0,7)).sort();
     cur = months[months.length-1];
     await save('Importação de '+files.length+' arquivo'+(files.length>1?'s':'')+': '+totalAdded+' lançamento'+(totalAdded>1?'s':'')+' novo'+(totalAdded>1?'s':''));
-  }
+  } else if (provMudou) await save('Fatura C6 importada: valor provisório removido');
   renderAll();
 }
 
@@ -655,6 +670,7 @@ function validState(o){ return o && Array.isArray(o.tx) && o.cfg && Array.isArra
 function fixState(o){
   const b = blankState();
   o.imports = o.imports || [];
+  if (!Array.isArray(o.provisorios)) o.provisorios = [];
   for (const k of Object.keys(b.cfg)) if (Array.isArray(b.cfg[k]) && !Array.isArray(o.cfg[k])) o.cfg[k] = b.cfg[k];
   if (!o.cfg.fixos || typeof o.cfg.fixos !== 'object' || Array.isArray(o.cfg.fixos)) o.cfg.fixos = {};
   migrarEntradas(o);
@@ -934,10 +950,57 @@ async function boot(){
 }
 
 // ---------- cálculo ----------
-const gastosDe = m => S.tx.filter(t => t.kind === 'gasto' && t.d.startsWith(m));
+// ---------- fatura em aberto (valor provisório digitado por você) ----------
+// O C6 só exporta a fatura fechada. Durante o mês, você digita o total da fatura em aberto;
+// ele entra nos totais como um gasto provisório e sai quando a fatura fechada é importada.
+const provisoriosDe = m => (S.provisorios || []).filter(p => p.mes === m).map(p => ({
+  id:'prov-'+p.banco+'-'+p.mes, d:p.mes+'-01', desc:'Fatura '+p.banco+' em aberto (provisório)', v:p.valor,
+  tipo:'Cartão', banco:p.banco, kind:'gasto', cat:'Fatura '+p.banco+' em aberto', prov:true}));
+// Remove os provisórios cobertos por uma fatura fechada (atualizados até 3 dias depois da última compra dela).
+function trocarProvisorios(banco, ultimaCompra){
+  const removidos = [], mantidos = [];
+  if (!ultimaCompra) return {removidos, mantidos};
+  const limite = new Date(ultimaCompra+'T23:59:59'); limite.setDate(limite.getDate() + 3);
+  S.provisorios = (S.provisorios || []).filter(p => {
+    if (p.banco !== banco || p.mes > ultimaCompra.slice(0,7)) return true;
+    if (new Date(p.atualizado) <= limite){ removidos.push(p.mes); return false; }
+    mantidos.push(p.mes); return true;
+  });
+  return {removidos, mantidos};
+}
+function renderProvisorio(){
+  const box = $('provBox'); if (!box) return;
+  const p = (S.provisorios || []).find(x => x.banco === 'C6' && x.mes === cur);
+  box.hidden = !p && cur !== thisMonth();
+  if (box.hidden) return;
+  const mes = monthLabel(cur, true);
+  $('provDel').hidden = !p;
+  $('provValor').placeholder = p ? 'Novo total' : 'Total no app do C6';
+  $('provInfo').innerHTML = p
+    ? '<b>'+brl(p.valor)+'</b> somados como provisório em '+mes+' · atualizado em '+new Date(p.atualizado).toLocaleString('pt-BR', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})+'. Some sozinho quando você importar a fatura fechada do C6.'
+    : 'O C6 só exporta a fatura fechada. Para acompanhar '+mes+', abra o app do C6, veja o total da fatura em aberto e digite aqui. O valor entra nos totais como provisório e é trocado pelas compras de verdade quando você importar a fatura.';
+}
+$('provForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (bloqueado()) return;
+  const v = parseValor($('provValor').value);
+  if (!v || v <= 0) return toast('Digite o total da fatura em aberto, por exemplo 1.234,56.');
+  S.provisorios = (S.provisorios || []).filter(x => !(x.banco === 'C6' && x.mes === cur));
+  S.provisorios.push({banco:'C6', mes:cur, valor:round2(v), atualizado:new Date().toISOString()});
+  $('provValor').value = '';
+  await save('Fatura C6 em aberto: '+brl(v)); renderAll();
+  toast('Fatura do C6 em aberto atualizada: '+brl(v)+'.');
+});
+$('provDel').addEventListener('click', async () => {
+  if (bloqueado()) return;
+  S.provisorios = (S.provisorios || []).filter(x => !(x.banco === 'C6' && x.mes === cur));
+  await save('Fatura C6 em aberto removida'); renderAll();
+});
+
+const gastosDe = m => S.tx.filter(t => t.kind === 'gasto' && t.d.startsWith(m)).concat(provisoriosDe(m));
 const entradasDe = m => S.tx.filter(t => t.kind === 'entrada' && t.d.startsWith(m));
 const catNames = () => S.cfg.cats.map(c => c[0]);
-function allMonths(){ return [...new Set(S.tx.map(t => t.d.slice(0,7)))].sort(); }
+function allMonths(){ return [...new Set(S.tx.map(t => t.d.slice(0,7)).concat((S.provisorios || []).map(p => p.mes)))].sort(); }
 function grupoTipo(t){ return t.tipo === 'Cartão' ? 'Cartão' : t.tipo === 'PIX' ? 'PIX' : 'Boletos e débitos'; }
 
 // ---------- entradas: origem e salário ----------
@@ -1133,10 +1196,10 @@ function renderParcelas(){
 // ---------- renderização ----------
 function renderAll(){
   const months = allMonths();
-  if (!cur || (!months.includes(cur) && months.length)) cur = months[months.length-1] || thisMonth();
+  if (!cur || (!months.includes(cur) && cur !== thisMonth() && months.length)) cur = months[months.length-1] || thisMonth();
   const sel = $('mes'); sel.innerHTML = '';
-  const opts = months.length ? months.slice().reverse() : [cur];
-  if (!opts.includes(cur)) opts.unshift(cur);
+  // o mês atual sempre aparece na lista, para dar para lançar a fatura em aberto antes de importar algo
+  const opts = [...new Set(months.concat([thisMonth(), cur]))].sort().reverse();
   for (const k of opts){ const o = document.createElement('option'); o.value = k; o.textContent = monthLabel(k, true); sel.appendChild(o); }
   sel.value = cur;
   renderSaveStatus();
@@ -1162,6 +1225,9 @@ function renderResumo(){
   const ks = $('k-gas-s');
   if (prev > 0){ const p = (tg/prev - 1)*100; ks.textContent = (p>=0?'▲ ':'▼ ')+Math.abs(p).toFixed(1).replace('.',',')+'% vs. mês anterior'; ks.className = 's '+(p>0?'up':'down'); }
   else { ks.textContent = 'sem mês anterior para comparar'; ks.className = 's'; }
+  const provMes = sum(g.filter(t => t.prov));
+  if (provMes) ks.textContent += ' · inclui '+brl(provMes)+' provisório do C6';
+  renderProvisorio();
   $('k-res-h').textContent = res >= 0 ? 'Resultado do mês: sobra' : 'Resultado do mês: falta';
   const kr = $('k-res'); kr.textContent = brl(res); kr.className = 'v '+(res>=0?'pos':'neg');
   $('k-res-s').textContent = te ? Math.round(res/te*100)+'% das entradas' : '';
@@ -1209,7 +1275,7 @@ function renderResumo(){
       plugins:{legend:{position:'bottom', labels:{boxWidth:10}}, tooltip:{callbacks:{label:c=>' '+c.dataset.label+': '+brl(c.parsed.y)}}}}});
   }
 
-  $('top').innerHTML = [...g].sort((a,b)=>b.v-a.v).slice(0,8).map(t => '<tr><td>'+fmtDate(t.d).slice(0,5)+'</td><td class="desc">'+esc(t.desc)+'</td><td><span class="tag">'+esc(t.tipo)+'</span></td><td class="r">'+brl(t.v)+'</td></tr>').join('') || '<tr><td colspan="4" class="muted">Sem gastos neste mês.</td></tr>';
+  $('top').innerHTML = g.filter(t => !t.prov).sort((a,b)=>b.v-a.v).slice(0,8).map(t => '<tr><td>'+fmtDate(t.d).slice(0,5)+'</td><td class="desc">'+esc(t.desc)+'</td><td><span class="tag">'+esc(t.tipo)+'</span></td><td class="r">'+brl(t.v)+'</td></tr>').join('') || '<tr><td colspan="4" class="muted">Sem gastos neste mês.</td></tr>';
 
   const ms = allMonths().slice().reverse();
   $('anual').innerHTML = ms.map(m => { const gg = gastosDe(m), ee = sum(entradasDe(m)), tt = sum(gg), r = ee - tt;
