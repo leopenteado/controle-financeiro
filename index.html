@@ -214,7 +214,7 @@ dialog label{display:flex;gap:8px;align-items:center;margin:6px 0}
   <section id="tab-lanc" hidden>
     <div class="card" style="margin-bottom:12px">
       <div class="filters">
-        <select id="fPer" aria-label="Período"><option value="mes">Mês selecionado</option><option value="todos">Todos os meses</option></select>
+        <select id="fPer" aria-label="Período"></select>
         <select id="fNat" aria-label="Natureza"><option value="gasto">Gastos</option><option value="entrada">Entradas</option><option value="">Gastos e entradas</option></select>
         <select id="fCat" aria-label="Categoria"></select>
         <select id="fBanco" aria-label="Banco"><option value="">Todos os bancos</option></select>
@@ -1319,11 +1319,16 @@ function renderLanc(){
 
   const fixSet = new Set(gastosFixos().lista.map(f => f.k));
   const btnFixo = t => t.kind === 'gasto' && !parcInfo(t) ? '<button type="button" class="pin'+(fixSet.has(fixoKey(t))?' on':'')+'" data-act="fixo" title="'+(fixSet.has(fixoKey(t))?'É gasto fixo: clique para tirar':'Marcar como gasto fixo')+'">fixo</button>' : '';
-  const per = $('fPer').value, cat = fc.value, banco = fb.value, q = norm($('fBusca').value);
-  const rows = S.tx.filter(t => (per === 'todos' || t.d.startsWith(cur)) && (!fNat || t.kind === fNat) && (!cat || t.cat === cat) && (!banco || t.banco === banco) && (!q || norm(t.desc).includes(q)))
+  // Filtro de período: todos os meses ou qualquer mês com lançamentos (padrão: o mês escolhido no topo).
+  const fp = $('fPer'), prevPer = fp.value;
+  const mesesLanc = [...new Set(S.tx.map(t => t.d.slice(0,7)).concat([cur]))].sort().reverse();
+  fp.innerHTML = '<option value="todos">Todos os meses</option>' + mesesLanc.map(m => '<option value="'+m+'">'+esc(monthLabel(m, true))+'</option>').join('');
+  fp.value = prevPer === 'todos' || mesesLanc.includes(prevPer) ? prevPer : cur;
+  const per = fp.value, cat = fc.value, banco = fb.value, q = norm($('fBusca').value);
+  const rows = S.tx.filter(t => (per === 'todos' || t.d.startsWith(per)) && (!fNat || t.kind === fNat) && (!cat || t.cat === cat) && (!banco || t.banco === banco) && (!q || norm(t.desc).includes(q)))
     .sort((a,b) => b.d.localeCompare(a.d) || a.desc.localeCompare(b.desc));
   const tot = sum(rows.filter(t=>t.kind==='gasto')) , tote = sum(rows.filter(t=>t.kind==='entrada'));
-  $('lancInfo').textContent = rows.length + ' lançamento' + (rows.length===1?'':'s') + (tot ? ' · gastos '+brl(tot) : '') + (tote ? ' · entradas '+brl(tote) : '') + (per==='mes' ? ' · '+monthLabel(cur,true) : '');
+  $('lancInfo').textContent = rows.length + ' lançamento' + (rows.length===1?'':'s') + (tot ? ' · gastos '+brl(tot) : '') + (tote ? ' · entradas '+brl(tote) : '') + (per!=='todos' ? ' · '+monthLabel(per,true) : ' · todos os meses');
   $('lancBody').innerHTML = rows.map(t => '<tr data-id="'+t.id+'"><td>'+fmtDate(t.d)+'</td><td class="desc">'+esc(t.desc)+'</td><td><span class="tag">'+esc(t.tipo)+'</span></td><td>'+esc(t.banco)+'</td><td><select data-act="cat" aria-label="Categoria">'+catOptions(t.kind, t.cat)+'</select></td><td class="r '+(t.kind==='entrada'?'pos':'')+'">'+(t.kind==='entrada'?'+ ':'')+brl(t.v)+'</td><td style="white-space:nowrap">'+btnFixo(t)+'<button type="button" class="x" data-act="del" title="Excluir lançamento" aria-label="Excluir">×</button></td></tr>').join('')
     || '<tr><td colspan="7" class="muted">Nenhum lançamento com esses filtros.</td></tr>';
 }
@@ -1351,11 +1356,11 @@ function toast(html, actions){
 }
 
 // ---------- eventos ----------
-$('mes').addEventListener('change', e => { cur = e.target.value; renderResumo(); renderLanc(); });
+$('mes').addEventListener('change', e => { cur = e.target.value; if ($('fPer').value !== 'todos') $('fPer').value = cur; renderResumo(); renderLanc(); });
 $('arq').addEventListener('change', async e => { const files = [...e.target.files]; e.target.value = ''; if (files.length) await importFiles(files); });
 document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
 function showTab(name){ document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x.dataset.tab === name)); ['resumo','lanc','cfg'].forEach(n => $('tab-'+n).hidden = n !== name); if (name === 'resumo') renderResumo(); }
-$('verOutros').addEventListener('click', () => { $('fPer').value = 'mes'; $('fNat').value = 'gasto'; renderLanc(); $('fCat').value = 'Outros'; renderLanc(); showTab('lanc'); });
+$('verOutros').addEventListener('click', () => { $('fPer').value = cur; $('fNat').value = 'gasto'; renderLanc(); $('fCat').value = 'Outros'; renderLanc(); showTab('lanc'); });
 $('revGastos').addEventListener('click', () => abrirRevisao('gasto'));
 $('revPular').addEventListener('click', () => { if (rev.fila[0]) rev.pulados.add(rev.fila[0]); mostrarRevisao(); });
 $('revFechar').addEventListener('click', () => $('dlgRev').close());
