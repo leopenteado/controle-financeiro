@@ -289,6 +289,9 @@ dialog label{display:flex;gap:8px;align-items:center;margin:6px 0}
         <h3 style="margin-top:12px">Ignorar (transferências entre minhas contas)</h3>
         <p class="help">Uma por linha. Movimentações de extrato que contenham qualquer um destes textos não contam como gasto nem entrada.</p>
         <textarea id="tIgn" style="min-height:90px"></textarea>
+        <h3 style="margin-top:12px">Contas suas que contam como gasto e entrada</h3>
+        <p class="help">Uma por linha (ex.: <code>btg</code>). Transferências para essas contas viram gasto e as que voltam viram entrada, na categoria <b>Day trade</b>, mesmo que estejam na lista de cima. Vale para as próximas importações; para incluir as antigas, importe de novo o extrato (nada duplica).</p>
+        <textarea id="tDT" style="min-height:60px"></textarea>
       </div>
     </div>
     <div class="grid two">
@@ -372,6 +375,7 @@ const DEFAULT_CFG = {
   c6rules: [["supermerc","Mercado"],["restaurante","Alimentação"],["automotivo","Transporte"],["transporte","Transporte"],["entretenimento","Lazer"],["recreativo","Lazer"],["departamento","Compras"],["especialidade varejo","Compras"],["casa /","Compras"],["telecom","Assinaturas"],["educa","Educação"]],
   // Suas contas e regras pessoais ficam no arquivo de dados (privado), não aqui no código.
   ignorar: [],
+  contarComo: [],
   // A ordem importa: a primeira regra que servir decide. "[pessoa física]" = Pix de alguém com CPF.
   entRules: [["salario","Salário"],["credito em conta","Dividendos"],["dividendo","Dividendos"],["rendimento","Dividendos"],["reembolso","Reembolso"],["estorno","Reembolso"],["devolu","Reembolso"],["[pessoa física]","Família"]]
 };
@@ -476,6 +480,14 @@ function criarRegra(t, cat){
 }
 function recategorizeAll(){ S.tx.forEach(t => { if (!t.manualCat) t.cat = categorize(t); }); }
 const isIgnored = text => !!firstMatch(S.cfg.ignorar.map(k=>[k,1]), text);
+// Contas suas que CONTAM como gasto (envio) e entrada (volta), ex.: corretora de day trade.
+// Têm prioridade sobre a lista de "Ignorar". Entram na categoria/tipo "Day trade".
+const DAY_TRADE = 'Day trade';
+function garantirDayTrade(kind){
+  if (kind === 'entrada'){ if (!S.cfg.tipos.includes(DAY_TRADE)) S.cfg.tipos.splice(Math.max(0, S.cfg.tipos.indexOf('Outros')), 0, DAY_TRADE); }
+  else if (!S.cfg.cats.some(c => c[0] === DAY_TRADE)){ const i = S.cfg.cats.findIndex(c => c[0] === 'Outros'); S.cfg.cats.splice(i < 0 ? S.cfg.cats.length : i, 0, [DAY_TRADE, 0]); }
+}
+const ehDayTrade = text => !!firstMatch((S.cfg.contarComo || []).map(k => [k, 1]), text);
 const PAG_FATURA = /pagamento (recebido|de fatura|efetuado)|pagamento on/;
 
 // ---------- leitores de arquivo ----------
@@ -550,10 +562,12 @@ function parseC6Extrato(lines, start){
     const val = round2(ent - sai);
     const nt = norm(tit);
     if (val === 0 || nt.includes('pgto fat') || nt.includes('pagamento de fatura')){ ignored++; continue; }
-    if (isIgnored(tit)){ own++; continue; }
+    const dt = ehDayTrade(tit + ' ' + (f[3]||''));
+    if (!dt && isIgnored(tit)){ own++; continue; }
     const key = 'c6e|'+d+'|'+nt+'|'+norm(f[3]||'')+'|'+val;
-    if (val < 0) rows.push({d, desc:tit, v:-val, tipo: nt.includes('pix enviado') ? 'PIX' : nt.includes('boleto') ? 'Boleto' : 'Débito', banco:'C6', kind:'gasto', mt:tit, key});
-    else rows.push({d, desc:tit, v:val, tipo:'Entrada', banco:'C6', kind:'entrada', mt:tit, key});
+    const extraDT = dt ? {presetCat:DAY_TRADE, desc:tit+' (day trade)'} : {};
+    if (val < 0) rows.push(Object.assign({d, desc:tit, v:-val, tipo: nt.includes('pix enviado') ? 'PIX' : nt.includes('boleto') ? 'Boleto' : 'Débito', banco:'C6', kind:'gasto', mt:tit, key}, extraDT));
+    else rows.push(Object.assign({d, desc:tit, v:val, tipo:'Entrada', banco:'C6', kind:'entrada', mt:tit, key}, extraDT));
   }
   return {kind:'Extrato C6', rows, ignored, own};
 }
@@ -567,17 +581,19 @@ function parseNuExtrato(lines, start){
     const id = f[2]||'';
     const full = f.slice(3).join(',').replace(/"/g,'').trim();
     if (!d || v === null || v === 0 || norm(full).includes('pagamento de fatura')){ ignored++; continue; }
-    if (isIgnored(full)){ own++; continue; }
+    const dt = ehDayTrade(full);
+    if (!dt && isIgnored(full)){ own++; continue; }
     const nf = norm(full);
     const tp = nf.includes('enviada') ? 'Pix enviado' : nf.includes('pelo pix') ? 'Pix recebido' : nf.includes('recebida') ? 'Transferência recebida' : nf.includes('boleto') ? 'Boleto' : '';
     const p = full.indexOf(' - ');
     const after = p >= 0 ? full.slice(p+3) : '';
     const q = after.indexOf(' - ');
     const nome = (q >= 0 ? after.slice(0, q) : after).replace(/\s+/g,' ').trim();
-    const desc = (after && tp) ? tp+' - '+nome : full;
+    const desc = ((after && tp) ? tp+' - '+nome : full) + (dt ? ' (day trade)' : '');
     const key = 'nue|'+(id || d+'|'+nf+'|'+v);
-    if (v < 0) rows.push({d, desc, v:-v, tipo: tp==='Boleto' ? 'Boleto' : tp==='Pix enviado' ? 'PIX' : 'Débito', banco:'Nubank', kind:'gasto', mt:desc, key, uniq:!!id});
-    else rows.push({d, desc, v, tipo:'Entrada', banco:'Nubank', kind:'entrada', mt:full, key, uniq:!!id});
+    const extraDT = dt ? {presetCat:DAY_TRADE} : {};
+    if (v < 0) rows.push(Object.assign({d, desc, v:-v, tipo: tp==='Boleto' ? 'Boleto' : tp==='Pix enviado' ? 'PIX' : 'Débito', banco:'Nubank', kind:'gasto', mt:desc, key, uniq:!!id}, extraDT));
+    else rows.push(Object.assign({d, desc, v, tipo:'Entrada', banco:'Nubank', kind:'entrada', mt:full, key, uniq:!!id}, extraDT));
   }
   return {kind:'Extrato Nubank', rows, ignored, own};
 }
@@ -627,6 +643,7 @@ async function importFiles(files){
       const t = {id:uid(), imp:imp.id, d:r.d, desc:r.desc, v:round2(r.v), tipo:r.tipo, banco:r.banco, kind:r.kind, mt:r.mt, key:r.key};
       if (r.c6) t.c6 = r.c6;
       if (r.presetCat){ t.cat = r.presetCat; t.manualCat = true; } else t.cat = categorize(t);
+      if (t.cat === DAY_TRADE) garantirDayTrade(t.kind);
       S.tx.push(t); existing.add(r.key); added++;
       if (t.kind === 'gasto'){ gastos++; vg += t.v; } else { entradas++; ve += t.v; }
     }
@@ -1315,6 +1332,7 @@ function renderCfg(){
   $('catBody').innerHTML = S.cfg.cats.map(([n,o],i) => '<tr data-i="'+i+'"><td><input type="text" data-k="n" value="'+esc(n)+'" aria-label="Nome da categoria"></td><td class="r"><input type="number" data-k="o" min="0" step="10" value="'+esc(o)+'" style="width:110px;text-align:right" aria-label="Orçamento"></td><td><button type="button" class="x" data-k="del" title="Remover categoria">×</button></td></tr>').join('');
   $('tTipos').value = S.cfg.tipos.join('\n');
   $('tIgn').value = S.cfg.ignorar.join('\n');
+  $('tDT').value = (S.cfg.contarComo || []).join('\n');
   $('tRules').value = S.cfg.rules.map(r => r[0]+' = '+r[1]).join('\n');
   $('tC6').value = S.cfg.c6rules.map(r => r[0]+' = '+r[1]).join('\n');
   $('tEnt').value = S.cfg.entRules.map(r => r[0]+' = '+r[1]).join('\n');
@@ -1399,6 +1417,7 @@ $('saveRules').addEventListener('click', async () => {
   S.cfg.rules = parsePairs($('tRules').value); S.cfg.c6rules = parsePairs($('tC6').value); S.cfg.entRules = parsePairs($('tEnt').value);
   S.cfg.tipos = parseList($('tTipos').value); if (!S.cfg.tipos.includes('Outros')) S.cfg.tipos.push('Outros');
   S.cfg.ignorar = parseList($('tIgn').value);
+  S.cfg.contarComo = parseList($('tDT').value);
   const before = S.tx.map(t => t.cat).join('|');
   recategorizeAll(); await save();
   const changed = S.tx.filter((t,i) => t.cat !== before.split('|')[i]).length;
